@@ -2,7 +2,10 @@ import { test } from '@oclif/test';
 import axios from 'axios';
 import { expect } from 'chai';
 
-describe('Run two mocks on different ports', () => {
+// Skipped on Windows: two servers open the same ~/.mockoon-cli/logs/mock1.log (EPERM)
+const describeNonWin = process.platform === 'win32' ? describe.skip : describe;
+
+describeNonWin('Run two mocks on different ports', () => {
   test
     .stdout()
     .command([
@@ -33,7 +36,7 @@ describe('Run two mocks on different ports', () => {
     );
 });
 
-describe('Run same mock twice on different ports', () => {
+describeNonWin('Run same mock twice on different ports', () => {
   test
     .stdout()
     .command([

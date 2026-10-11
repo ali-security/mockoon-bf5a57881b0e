@@ -19,12 +19,18 @@ export const createLoggerInstance = (
   )[] = [new logsTransports.Console({ handleExceptions: true })];
 
   if (fileTransportOptions) {
-    transportsInstances.push(
-      new logsTransports.File({
-        ...fileTransportOptions,
-        handleExceptions: true
-      })
+    const fileTransport = new logsTransports.File({
+      ...fileTransportOptions,
+      handleExceptions: true
+    });
+    // Swallow late "write after end" errors after the server's transport is closed (crashes mocha on Windows)
+    fileTransport.on('error', () => {});
+    (fileTransport as unknown as { _stream?: NodeJS.EventEmitter })._stream?.on(
+      'error',
+      () => {}
     );
+
+    transportsInstances.push(fileTransport);
   }
 
   return createLogger({

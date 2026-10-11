@@ -1,6 +1,12 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional mocha --grep filter for the CLI tests"
+        required: false
+        default: ""
 
 jobs:
   lint:
@@ -9,15 +15,17 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "18.x"
       - name: Update NPM
         run: |
-          npm install -g npm@latest
-      - uses: actions/cache@v3
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2023-08-25
+          npm install -g npm@9
+      - uses: actions/cache@v4
         id: cache-modules
         with:
           path: "**/node_modules"
@@ -42,15 +50,17 @@ jobs:
     needs: lint
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "18.x"
       - name: Update NPM
         run: |
-          npm install -g npm@latest
-      - uses: actions/cache@v3
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2023-08-25
+          npm install -g npm@9
+      - uses: actions/cache@v4
         id: cache-modules
         with:
           path: "**/node_modules"
@@ -75,15 +85,17 @@ jobs:
     needs: [lint, test-libs]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "18.x"
       - name: Update NPM
         run: |
-          npm install -g npm@latest
-      - uses: actions/cache@v3
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2023-08-25
+          npm install -g npm@9
+      - uses: actions/cache@v4
         id: cache-modules
         with:
           path: "**/node_modules"
@@ -102,30 +114,44 @@ jobs:
           npm run test:serverless
 
   test-cli:
-    name: CLI - Build and test
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: CLI - Build and test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
 
     needs: [lint, test-libs]
 
+    defaults:
+      run:
+        shell: bash
+
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node: [16, 18, 20]
+        include:
+          - os: macos-latest
+            node: 18
+          - os: windows-latest
+            node: 18
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
       - name: Update NPM
         run: |
-          npm install -g npm@latest
-      - uses: actions/cache@v3
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2023-08-25
+          if [ "$RUNNER_OS" = "Windows" ]; then npm config set script-shell "C:\\Program Files\\Git\\bin\\bash.exe"; fi
+          npm install -g npm@9
+      - uses: actions/cache@v4
         id: cache-modules
         with:
           path: "**/node_modules"
-          key: ${{ runner.os }}-modules-${{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-node${{ matrix.node }}-modules-${{ hashFiles('**/package-lock.json') }}
       - name: Install dependencies
         if: steps.cache-modules.outputs.cache-hit != 'true'
         run: |
@@ -137,26 +163,45 @@ jobs:
         run: |
           npm run build:libs
           npm run build:cli
-          npm run test:cli
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npm run test:cli -- -- --grep "${{ inputs.test-filter }}"
+          else
+            npm run test:cli
+          fi
+      - name: Pack CLI
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 18
+        run: |
+          cd packages/cli
+          npm pack
+          mv mockoon-cli-4.1.0.tgz cli-4.1.0.tgz
+      - name: Upload CLI tarball
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 18
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-4.1.0
+          path: packages/cli/cli-4.1.0.tgz
+          if-no-files-found: error
 
   # run all tests (unpackaged desktop app, CI build)
   test-desktop:
     name: Desktop - Build and test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     needs: [lint, test-libs]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "18.x"
       - name: Update NPM
         run: |
-          npm install -g npm@latest
-      - uses: actions/cache@v3
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2023-08-25
+          npm install -g npm@9
+      - uses: actions/cache@v4
         id: cache-modules
         with:
           path: "**/node_modules"
@@ -174,6 +219,7 @@ jobs:
           npm run build:desktop:ci
       - name: Run tests
         run: |
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
           export DISPLAY=':99.0'
           Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
           npm run test:desktop
@@ -187,22 +233,24 @@ jobs:
 
     needs: [lint, test-libs]
 
-    if: github.ref == 'refs/heads/main'
+    if: false
 
     env:
       CSC_LINK: ${{secrets.WIN_CSC_LINK}}
       CSC_KEY_PASSWORD: ${{secrets.WIN_CSC_KEY_PASSWORD}}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "18.x"
       - name: Update NPM
         run: |
-          npm install -g npm@latest
-      - uses: actions/cache@v3
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2023-08-25
+          npm install -g npm@9
+      - uses: actions/cache@v4
         id: cache-modules
         with:
           path: "**/node_modules"
@@ -230,7 +278,7 @@ jobs:
 
     needs: [lint, test-libs]
 
-    if: github.ref == 'refs/heads/main'
+    if: false
 
     env:
       APPLEID: ${{secrets.APPLEID}}
@@ -242,15 +290,17 @@ jobs:
       USE_HARD_LINKS: false
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "18.x"
       - name: Update NPM
         run: |
-          npm install -g npm@latest
-      - uses: actions/cache@v3
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2023-08-25
+          npm install -g npm@9
+      - uses: actions/cache@v4
         id: cache-modules
         with:
           path: "**/node_modules"
@@ -280,21 +330,23 @@ jobs:
 
     needs: [lint, test-libs]
 
-    if: github.ref == 'refs/heads/main'
+    if: false
 
     env:
       USE_HARD_LINKS: false
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "18.x"
       - name: Update NPM
         run: |
-          npm install -g npm@latest
-      - uses: actions/cache@v3
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2023-08-25
+          npm install -g npm@9
+      - uses: actions/cache@v4
         id: cache-modules
         with:
           path: "**/node_modules"

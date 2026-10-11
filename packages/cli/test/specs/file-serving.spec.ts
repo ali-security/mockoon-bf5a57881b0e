@@ -6,9 +6,10 @@ import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 
 const relativeError =
-  'Access to relative path outside of the environment base directory';
+  'Access to relative path outside of the allowed base directory';
 const absoluteError =
   'Access to absolute path outside of the original static base directory';
+const rootError = 'Templated file path requires a non-root base directory';
 
 // environment generated at runtime as absolute paths are OS dependent
 const absoluteEnvPath = join(tmpdir(), 'mockoon-cli-file-serving.json');
@@ -52,15 +53,29 @@ describe('File serving', () => {
       expect(body).to.contain(relativeError);
       expect(body).to.not.contain('filecontent');
 
+      // templated relative path staying within its static base directory
       body = await getBody(3000, '/param2/file1');
+      expect(body).to.contain('filecontent');
+
+      // templated relative path escaping its static base directory
+      body = await getBody(3000, '/param2/..%2Fenvs%2Fmock1');
       expect(body).to.contain(relativeError);
-      expect(body).to.not.contain('filecontent');
+
+      // partially templated file name (helper in the middle of the file name)
+      body = await getBody(3000, '/testfile/1');
+      expect(body).to.contain('filecontent');
+
+      body = await getBody(3000, '/testfile/2');
+      expect(body).to.contain('filecontent2');
+
+      body = await getBody(3000, '/testfile/%2F..%2F..%2Fbody-files%2Ffile1');
+      expect(body).to.contain(relativeError);
     })
     .finally(() => {
       process.emit('SIGINT');
     })
     .it(
-      'should get the file content with a relative path from the environment file and prevent templated path traversal',
+      'should get the file content with a relative path from the environment file, allow templated paths within their static base and prevent templated path traversal',
       (context) => {
         expect(context.stdout).to.contain('Server started');
       }
@@ -98,9 +113,9 @@ describe('File serving', () => {
       expect(body).to.contain(absoluteError);
       expect(body).to.not.contain('filecontent');
 
-      // fully templated absolute path
+      // fully templated absolute path (no allowed base directory)
       body = await getBody(3010, `/param2/${encodedOutsideFile}`);
-      expect(body).to.contain(absoluteError);
+      expect(body).to.contain(rootError);
       expect(body).to.not.contain('filecontent');
     })
     .finally(() => {

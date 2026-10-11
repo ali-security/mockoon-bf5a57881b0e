@@ -31,7 +31,7 @@ import {
 } from 'https';
 import killable from 'killable';
 import { lookup as mimeTypeLookup } from 'mime-types';
-import { basename, extname, isAbsolute, resolve, sep } from 'path';
+import { basename, extname, isAbsolute, parse, relative, resolve } from 'path';
 import { parse as qsParse } from 'qs';
 import { SecureContextOptions } from 'tls';
 import TypedEmitter from 'typed-emitter';
@@ -1244,8 +1244,11 @@ export class MockoonServer extends (EventEmitter as new () => TypedEmitter<Serve
    * Parse file paths and prevent path traversal
    *
    * If the path is absolute, it must stay within its original static base
-   * (before the first {{...}})
-   * If the path is relative, it must stay within the environment base directory
+   * directory (last folder separator before the first {{...}})
+   * If the path is relative, it must stay within its static base directory
+   * (resolved from the environment base directory), or within the
+   * environment base directory if there is no static base directory
+   * The allowed base directory cannot be the filesystem root
    *
    * @param filePath
    * @param request
@@ -1253,16 +1256,21 @@ export class MockoonServer extends (EventEmitter as new () => TypedEmitter<Serve
    */
   private getSafeFilePath(filePath: string, request?: Request) {
     // always compare absolute paths (environment directory defaults to the current working directory)
-    const environmentDirectory = resolve(
+    const environmentBaseDir = resolve(
       this.options.environmentDirectory || '.'
     );
     const resolvePath = (path: string) =>
-      isAbsolute(path) ? resolve(path) : resolve(environmentDirectory, path);
-    // a path is within a directory if it is the directory itself or starts with the directory followed by a separator (prevents sibling directories sharing the same prefix to match)
-    const isPathInDirectory = (path: string, directory: string) =>
-      path === directory ||
-      path.startsWith(directory.endsWith(sep) ? directory : directory + sep);
+      isAbsolute(path) ? resolve(path) : resolve(environmentBaseDir, path);
+    // a path is inside a directory if it is the directory itself or a descendant (prevents sibling directories sharing the same prefix to match)
+    const isPathInsideBase = (basePath: string, candidatePath: string) => {
+      const relativePath = relative(basePath, candidatePath);
 
+      return (
+        relativePath === '' ||
+        (!relativePath.startsWith('..') && !isAbsolute(relativePath))
+      );
+    };
+    const isFileSystemRoot = (path: string) => path === parse(path).root;
     // Convert backslashes to forward slashes (Windows compatibility)
     const rawFilePath = filePath.replace(/\\/g, '/');
 
@@ -1274,14 +1282,11 @@ export class MockoonServer extends (EventEmitter as new () => TypedEmitter<Serve
       return resolvePath(rawFilePath);
     }
 
-    // Extract static base from templated string (before first {{...}})
-    const staticBaseMatch = rawFilePath.match(/^([^{}]+)/);
-    const staticBase = staticBaseMatch ? staticBaseMatch[1] : null;
-    // directory part of the static base (it may end with a partial file name: e.g. /data/file-{{...}})
-    const staticBaseDirectory =
-      staticBase && staticBase.includes('/')
-        ? resolve(staticBase.slice(0, staticBase.lastIndexOf('/') + 1))
-        : null;
+    // Extract static base directory from templated string (last folder separator before the first {{...}})
+    const staticBaseMatch = rawFilePath.match(/^([^{}]*\/)/);
+    const staticBaseDir = staticBaseMatch?.[1]
+      ? resolvePath(staticBaseMatch[1])
+      : null;
 
     const parsedFilePath = TemplateParser(
       false,
@@ -1294,26 +1299,21 @@ export class MockoonServer extends (EventEmitter as new () => TypedEmitter<Serve
     // Determine if the path is absolute or relative
     const isPathAbsolute = isAbsolute(parsedFilePath);
     const resolvedPath = resolvePath(parsedFilePath);
+    const allowedBaseDir =
+      staticBaseDir ?? (!isPathAbsolute ? environmentBaseDir : null);
 
-    if (isPathAbsolute) {
-      // Absolute paths must stay within their original static base
-      if (
-        !staticBase ||
-        !staticBaseDirectory ||
-        !isPathInDirectory(resolvedPath, staticBaseDirectory) ||
-        !resolvedPath.startsWith(resolve(staticBase))
-      ) {
-        throw new Error(
-          `Access to absolute path outside of the original static base directory (${resolvedPath})`
-        );
-      }
-    } else {
-      // Relative paths must stay within the environment base directory
-      if (!isPathInDirectory(resolvedPath, environmentDirectory)) {
-        throw new Error(
-          `Access to relative path outside of the environment base directory (${resolvedPath})`
-        );
-      }
+    if (!allowedBaseDir || isFileSystemRoot(allowedBaseDir)) {
+      throw new Error(
+        `Templated file path requires a non-root base directory (${resolvedPath})`
+      );
+    }
+
+    if (!isPathInsideBase(allowedBaseDir, resolvedPath)) {
+      throw new Error(
+        isPathAbsolute
+          ? `Access to absolute path outside of the original static base directory (${resolvedPath})`
+          : `Access to relative path outside of the allowed base directory (${resolvedPath})`
+      );
     }
 
     return resolvedPath;

@@ -2,13 +2,14 @@ import { BodyTypes, Environment, ServerErrorCodes } from '@mockoon/commons';
 import { expect } from 'chai';
 import { promises as fs } from 'fs';
 import { get as httpGet } from 'http';
-import { isAbsolute, resolve, sep } from 'path';
+import { isAbsolute, parse, resolve, sep } from 'path';
 import { MockoonServer } from '../../../src';
 
 const relativeError =
-  'Access to relative path outside of the environment base directory';
+  'Access to relative path outside of the allowed base directory';
 const absoluteError =
   'Access to absolute path outside of the original static base directory';
+const rootError = 'Templated file path requires a non-root base directory';
 const urlParam = "{{urlParam 'file'}}";
 const queryParam = "{{queryParam 'file'}}";
 
@@ -131,8 +132,9 @@ describe('Server file serving path traversal', () => {
         const fullPath = safePath(server, urlParam, { file });
 
         expect(queryPath).to.contain(relativeError);
+        // fully templated absolute paths have no allowed base directory
         expect(fullPath).to.contain(
-          isAbsolute(file) ? absoluteError : relativeError
+          isAbsolute(file) ? rootError : relativeError
         );
       });
     });
@@ -144,22 +146,23 @@ describe('Server file serving path traversal', () => {
       expect(filePath).to.contain(relativeError);
     });
 
-    it('should prevent templated paths with a static part outside of the environment directory', () => {
+    it('should check templated paths with a static part outside of the environment directory against their static base directory', () => {
       const filePath = safePath(server, `../${urlParam}`, { file: 'a.json' });
+      const outsidePath = safePath(server, `../${urlParam}`, {
+        file: '../a.json'
+      });
 
-      expect(filePath).to.contain(relativeError);
+      expect(filePath).to.equal(resolve(envDir, '../a.json'));
+      expect(outsidePath).to.contain(relativeError);
     });
 
     it('should prevent path traversal using backslashes', () => {
       const file = '..\\plain.data';
       const filePath = safePath(server, `./${urlParam}`, { file });
 
-      if (sep === '\\') {
-        expect(filePath).to.contain(relativeError);
-      } else {
-        // backslashes are valid file name characters on POSIX systems
-        expect(filePath).to.equal(resolve(envDir, file));
-      }
+      // backslashes are valid file name characters on POSIX systems, but
+      // names starting with '..' are conservatively rejected on all platforms
+      expect(filePath).to.contain(relativeError);
     });
 
     it('should resolve a relative environment directory before checking templated paths', () => {
@@ -253,7 +256,135 @@ describe('Server file serving path traversal', () => {
       const file = resolve(dataDir, 'plain.data');
       const filePath = safePath(server, urlParam, { file });
 
-      expect(filePath).to.contain(absoluteError);
+      expect(filePath).to.contain(rootError);
+    });
+  });
+
+  describe('Templated file path safety', () => {
+    const publicDir = resolve('./test/data/public');
+    // filesystem root of the current drive (OS dependent)
+    const rootDir = parse(dataDir).root;
+
+    /**
+     * Call the server's private getSafeFilePath method with a fake request
+     * containing query string params
+     *
+     * @param server
+     * @param filePath
+     * @param query
+     */
+    const callGetSafeFilePath = (
+      server: MockoonServer,
+      filePath: string,
+      query: Record<string, string>
+    ): string =>
+      (server as any).getSafeFilePath(filePath, { params: {}, query });
+
+    it('should block absolute templated paths escaping to a sibling directory with a shared prefix', () => {
+      const server = new MockoonServer(environment, {
+        environmentDirectory: envDir
+      });
+
+      expect(() =>
+        callGetSafeFilePath(server, `${publicDir}/{{queryParam 'name'}}`, {
+          name: '../public_backup/secret.txt'
+        })
+      ).to.throw(/outside of the original static base directory/);
+    });
+
+    it('should block relative templated paths from escaping a nested static base when the environment directory is root', () => {
+      const server = new MockoonServer(environment, {
+        environmentDirectory: rootDir
+      });
+
+      expect(() =>
+        callGetSafeFilePath(server, "./static/{{queryParam 'name'}}", {
+          name: '../static_secret.txt'
+        })
+      ).to.throw(/outside of the allowed base directory/);
+    });
+
+    it('should reject templated file paths when the only allowed base directory is the filesystem root', () => {
+      const server = new MockoonServer(environment, {
+        environmentDirectory: rootDir
+      });
+
+      expect(() =>
+        callGetSafeFilePath(server, "./{{queryParam 'name'}}", {
+          name: 'test.data'
+        })
+      ).to.throw(/requires a non-root base directory/);
+    });
+
+    it('should reject templated file paths when the static base directory is the filesystem root', () => {
+      const server = new MockoonServer(environment, {
+        environmentDirectory: envDir
+      });
+      const rootTemplate = `${rootDir}{{queryParam 'name'}}`;
+      // relative static base climbing up to the filesystem root
+      const parentDirs = '../'.repeat(envDir.split(sep).length + 1);
+      const relativeRootTemplate = `${parentDirs}{{queryParam 'name'}}`;
+
+      expect(() =>
+        callGetSafeFilePath(server, rootTemplate, { name: 'etc/passwd' })
+      ).to.throw(/requires a non-root base directory/);
+      expect(() =>
+        callGetSafeFilePath(server, relativeRootTemplate, {
+          name: 'etc/passwd'
+        })
+      ).to.throw(/requires a non-root base directory/);
+    });
+
+    it('should allow templated relative paths that stay within their static base', () => {
+      const server = new MockoonServer(environment, {
+        environmentDirectory: rootDir
+      });
+
+      expect(
+        callGetSafeFilePath(server, "./static/{{queryParam 'name'}}", {
+          name: 'asset.txt'
+        })
+      ).to.equal(resolve(rootDir, 'static/asset.txt'));
+    });
+
+    it('should allow templated relative paths when the helper is in the middle of the file name', () => {
+      const server = new MockoonServer(environment, {
+        environmentDirectory: dataDir
+      });
+
+      expect(
+        callGetSafeFilePath(server, "./static/file{{queryParam 'name'}}.json", {
+          name: '1'
+        })
+      ).to.equal(resolve(dataDir, 'static/file1.json'));
+    });
+
+    it('should allow an absolute partially templated file path', () => {
+      const server = new MockoonServer(environment, {
+        environmentDirectory: dataDir
+      });
+
+      expect(
+        callGetSafeFilePath(
+          server,
+          `${publicDir}\\file{{queryParam 'name'}}.json`,
+          { name: '1' }
+        )
+      ).to.equal(resolve(publicDir, 'file1.json'));
+    });
+
+    it('should block templated paths escaping the static base when the helper is in the middle of the file name', () => {
+      const server = new MockoonServer(environment, {
+        environmentDirectory: dataDir
+      });
+
+      expect(() =>
+        callGetSafeFilePath(
+          server,
+          `${publicDir}/file{{queryParam 'name'}}.json`,
+          { name: '/../../secret' }
+        )
+      ).to.throw(/outside of the original static base directory/);
     });
   });
 
